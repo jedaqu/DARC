@@ -14,8 +14,6 @@ The production implementation is not yet established. Design and implementation 
 
 ## Repository policy
 
-- No secrets or credentials.
-- No private strategy or confidential research notes.
 - Reproducible builds and tests where practical.
 - Public documentation describes only the intended public project surface.
 
