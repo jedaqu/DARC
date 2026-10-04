@@ -32,7 +32,11 @@ pub struct ObjectStore<C: Codec> {
 }
 
 impl<C: Codec> ObjectStore<C> {
-    pub fn new(store_id: ObjectStoreId, block_size: usize, codec: C) -> Self {
+    pub fn new(block_size: usize, codec: C) -> Self {
+        Self::with_id(ObjectStoreId::new(), block_size, codec)
+    }
+
+    pub(crate) fn with_id(store_id: ObjectStoreId, block_size: usize, codec: C) -> Self {
         assert!(block_size > 0, "block_size must be positive");
         Self {
             store_id,
