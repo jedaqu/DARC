@@ -8,7 +8,7 @@ The public repository contains only material intended for publication. Private r
 
 ## Current status
 
-Phase 0 — public bootstrap and offline reference validation.
+Phase 1 — public core object model with in-memory deduplication and immutable state roots.
 
 The production implementation is not yet established. Design and implementation will evolve through reproducible tests and benchmarks.
 
