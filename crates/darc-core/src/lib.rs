@@ -91,13 +91,19 @@ impl StateRoot {
     pub fn from_entries(
         store: ObjectStoreId,
         entries: Vec<FileEntry>,
-    ) -> Result<Self, StoreMismatch> {
+    ) -> Result<Self, StateRootError> {
+        let mut names = std::collections::HashSet::with_capacity(entries.len());
+
         for entry in &entries {
             if entry.object.store_id() != store {
-                return Err(StoreMismatch {
+                return Err(StateRootError::StoreMismatch(StoreMismatch {
                     expected: store,
                     actual: entry.object.store_id(),
-                });
+                }));
+            }
+
+            if !names.insert(entry.name()) {
+                return Err(StateRootError::DuplicateName(entry.name.clone()));
             }
         }
 
@@ -281,8 +287,11 @@ impl ObjectStore {
             }));
         }
 
+        let slot = usize::try_from(object.slot())
+            .map_err(|_| ObjectStoreError::UnknownObject(object))?;
+
         self.objects
-            .get(object.slot() as usize)
+            .get(slot)
             .map(|bytes| bytes.as_ref())
             .ok_or(ObjectStoreError::UnknownObject(object))
     }
@@ -468,10 +477,27 @@ mod tests {
 
         assert_eq!(
             error,
-            StoreMismatch {
+            StateRootError::StoreMismatch(StoreMismatch {
                 expected: first.id(),
                 actual: second.id(),
-            }
+            })
         );
+    }
+
+    #[test]
+    fn from_entries_rejects_duplicate_names() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(1));
+        let object = store.intern(b"same");
+
+        let error = StateRoot::from_entries(
+            store.id(),
+            vec![
+                FileEntry::new("a", object),
+                FileEntry::new("a", object),
+            ],
+        )
+        .expect_err("duplicate names must be rejected");
+
+        assert_eq!(error, StateRootError::DuplicateName("a".to_owned()));
     }
 }
