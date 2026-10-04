@@ -347,7 +347,10 @@ impl ObjectStore {
     /// The snapshot stores the logical store identity and each object's digest plus
     /// original bytes. Objects are ordered by their content identity so equal stores
     /// serialize to the same bytes regardless of insertion order.
-    pub fn write_snapshot<W: Write>(&self, mut writer: W) -> Result<(), ObjectStorePersistenceError> {
+    pub fn write_snapshot<W: Write>(
+        &self,
+        mut writer: W,
+    ) -> Result<(), ObjectStorePersistenceError> {
         writer.write_all(&PERSISTENCE_MAGIC)?;
         writer.write_all(&PERSISTENCE_VERSION.to_le_bytes())?;
         writer.write_all(&self.id.get().to_le_bytes())?;
@@ -381,9 +384,8 @@ impl ObjectStore {
             return Err(ObjectStorePersistenceError::UnsupportedVersion(version));
         }
 
-        let store_id = ObjectStoreId::new(u128::from_le_bytes(read_array::<16>(
-            &data, &mut offset,
-        )?));
+        let store_id =
+            ObjectStoreId::new(u128::from_le_bytes(read_array::<16>(&data, &mut offset)?));
         let object_count = read_u64(&data, &mut offset)?;
         let mut store = Self::new(store_id);
 
@@ -737,8 +739,12 @@ mod tests {
 
         let mut first_bytes = Vec::new();
         let mut second_bytes = Vec::new();
-        first.write_snapshot(&mut first_bytes).expect("snapshot writes");
-        second.write_snapshot(&mut second_bytes).expect("snapshot writes");
+        first
+            .write_snapshot(&mut first_bytes)
+            .expect("snapshot writes");
+        second
+            .write_snapshot(&mut second_bytes)
+            .expect("snapshot writes");
 
         assert_eq!(first_bytes, second_bytes);
     }
@@ -829,5 +835,4 @@ mod tests {
             Err(ObjectStorePersistenceError::TrailingBytes)
         ));
     }
-
 }
