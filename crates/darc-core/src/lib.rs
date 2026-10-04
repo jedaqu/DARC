@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::{self, Read, Write};
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
@@ -230,6 +231,54 @@ impl fmt::Display for ObjectStoreError {
 
 impl std::error::Error for ObjectStoreError {}
 
+/// Errors raised while serializing or loading an object-store snapshot.
+#[derive(Debug)]
+pub enum ObjectStorePersistenceError {
+    Io(io::Error),
+    InvalidMagic,
+    UnsupportedVersion(u16),
+    Truncated,
+    LengthOverflow,
+    DigestMismatch { object: ObjectId, actual: [u8; 32] },
+    DuplicateObject(ObjectId),
+    TrailingBytes,
+}
+
+impl fmt::Display for ObjectStorePersistenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "I/O error: {error}"),
+            Self::InvalidMagic => write!(formatter, "invalid object-store magic"),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "unsupported object-store version: {version}")
+            }
+            Self::Truncated => write!(formatter, "truncated object-store snapshot"),
+            Self::LengthOverflow => write!(formatter, "object length does not fit in memory"),
+            Self::DigestMismatch { .. } => write!(formatter, "object digest mismatch"),
+            Self::DuplicateObject(_) => write!(formatter, "duplicate object in snapshot"),
+            Self::TrailingBytes => write!(formatter, "unexpected trailing bytes in snapshot"),
+        }
+    }
+}
+
+impl std::error::Error for ObjectStorePersistenceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for ObjectStorePersistenceError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+const PERSISTENCE_MAGIC: [u8; 8] = *b"DARCOS01";
+const PERSISTENCE_VERSION: u16 = 1;
+
 /// In-memory reference object store for the content-identity model.
 ///
 /// Objects are immutable after insertion. Their identity is derived from the
@@ -293,6 +342,96 @@ impl ObjectStore {
             .ok_or(ObjectStoreError::UnknownObject(object))
     }
 
+    /// Write a deterministic, versioned binary snapshot without compression.
+    ///
+    /// The snapshot stores the logical store identity and each object's digest plus
+    /// original bytes. Objects are ordered by their content identity so equal stores
+    /// serialize to the same bytes regardless of insertion order.
+    pub fn write_snapshot<W: Write>(
+        &self,
+        mut writer: W,
+    ) -> Result<(), ObjectStorePersistenceError> {
+        writer.write_all(&PERSISTENCE_MAGIC)?;
+        writer.write_all(&PERSISTENCE_VERSION.to_le_bytes())?;
+        writer.write_all(&self.id.get().to_le_bytes())?;
+        writer.write_all(&(self.objects.len() as u64).to_le_bytes())?;
+
+        let mut objects: Vec<_> = self.objects.iter().collect();
+        objects.sort_by_key(|(object_id, _)| **object_id);
+
+        for (object_id, bytes) in objects {
+            writer.write_all(&object_id.digest())?;
+            writer.write_all(&(bytes.len() as u64).to_le_bytes())?;
+            writer.write_all(bytes)?;
+        }
+
+        Ok(())
+    }
+
+    /// Load a versioned binary snapshot and verify every stored object digest.
+    pub fn read_snapshot<R: Read>(mut reader: R) -> Result<Self, ObjectStorePersistenceError> {
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+        let mut offset = 0usize;
+
+        let magic = read_array::<8>(&data, &mut offset)?;
+        if magic != PERSISTENCE_MAGIC {
+            return Err(ObjectStorePersistenceError::InvalidMagic);
+        }
+
+        let version = read_u16(&data, &mut offset)?;
+        if version != PERSISTENCE_VERSION {
+            return Err(ObjectStorePersistenceError::UnsupportedVersion(version));
+        }
+
+        let store_id =
+            ObjectStoreId::new(u128::from_le_bytes(read_array::<16>(&data, &mut offset)?));
+        let object_count = read_u64(&data, &mut offset)?;
+        let mut store = Self::new(store_id);
+
+        for _ in 0..object_count {
+            let digest = read_array::<32>(&data, &mut offset)?;
+            let length = usize::try_from(read_u64(&data, &mut offset)?)
+                .map_err(|_| ObjectStorePersistenceError::LengthOverflow)?;
+
+            let end = offset
+                .checked_add(length)
+                .ok_or(ObjectStorePersistenceError::LengthOverflow)?;
+            if end > data.len() {
+                return Err(ObjectStorePersistenceError::Truncated);
+            }
+
+            let payload = &data[offset..end];
+            offset = end;
+            let actual = sha256(payload);
+            let object_id = ObjectId {
+                store: store_id,
+                digest,
+            };
+
+            if actual != digest {
+                return Err(ObjectStorePersistenceError::DigestMismatch {
+                    object: object_id,
+                    actual,
+                });
+            }
+
+            if store.objects.contains_key(&object_id) {
+                return Err(ObjectStorePersistenceError::DuplicateObject(object_id));
+            }
+
+            store
+                .objects
+                .insert(object_id, Arc::<[u8]>::from(payload.to_vec()));
+        }
+
+        if offset != data.len() {
+            return Err(ObjectStorePersistenceError::TrailingBytes);
+        }
+
+        Ok(store)
+    }
+
     pub fn len(&self) -> usize {
         self.objects.len()
     }
@@ -300,6 +439,31 @@ impl ObjectStore {
     pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
+}
+
+fn read_array<const N: usize>(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<[u8; N], ObjectStorePersistenceError> {
+    let end = offset
+        .checked_add(N)
+        .ok_or(ObjectStorePersistenceError::Truncated)?;
+    let slice = data
+        .get(*offset..end)
+        .ok_or(ObjectStorePersistenceError::Truncated)?;
+    *offset = end;
+
+    let mut result = [0u8; N];
+    result.copy_from_slice(slice);
+    Ok(result)
+}
+
+fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16, ObjectStorePersistenceError> {
+    Ok(u16::from_le_bytes(read_array::<2>(data, offset)?))
+}
+
+fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64, ObjectStorePersistenceError> {
+    Ok(u64::from_le_bytes(read_array::<8>(data, offset)?))
 }
 
 fn sha256(bytes: &[u8]) -> [u8; 32] {
@@ -544,5 +708,131 @@ mod tests {
         .expect_err("duplicate names must be rejected");
 
         assert_eq!(error, StateRootError::DuplicateName("a".to_owned()));
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_store_and_objects() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        let first = store.intern(b"alpha").expect("intern succeeds");
+        let second = store.intern(b"beta").expect("intern succeeds");
+
+        let mut bytes = Vec::new();
+        store.write_snapshot(&mut bytes).expect("snapshot writes");
+
+        let restored = ObjectStore::read_snapshot(bytes.as_slice()).expect("snapshot reads");
+
+        assert_eq!(restored.id(), store.id());
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored.get(first).expect("first exists"), b"alpha");
+        assert_eq!(restored.get(second).expect("second exists"), b"beta");
+    }
+
+    #[test]
+    fn snapshot_is_deterministic_across_insertion_order() {
+        let mut first = ObjectStore::new(ObjectStoreId::new(7));
+        first.intern(b"alpha").expect("intern succeeds");
+        first.intern(b"beta").expect("intern succeeds");
+
+        let mut second = ObjectStore::new(ObjectStoreId::new(7));
+        second.intern(b"beta").expect("intern succeeds");
+        second.intern(b"alpha").expect("intern succeeds");
+
+        let mut first_bytes = Vec::new();
+        let mut second_bytes = Vec::new();
+        first
+            .write_snapshot(&mut first_bytes)
+            .expect("snapshot writes");
+        second
+            .write_snapshot(&mut second_bytes)
+            .expect("snapshot writes");
+
+        assert_eq!(first_bytes, second_bytes);
+    }
+
+    #[test]
+    fn snapshot_rejects_invalid_magic() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        store.intern(b"payload").expect("intern succeeds");
+        let mut bytes = Vec::new();
+        store.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes[0] ^= 0xFF;
+
+        assert!(matches!(
+            ObjectStore::read_snapshot(bytes.as_slice()),
+            Err(ObjectStorePersistenceError::InvalidMagic)
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_unsupported_version() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        store.intern(b"payload").expect("intern succeeds");
+        let mut bytes = Vec::new();
+        store.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+
+        assert!(matches!(
+            ObjectStore::read_snapshot(bytes.as_slice()),
+            Err(ObjectStorePersistenceError::UnsupportedVersion(2))
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_truncation() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        store.intern(b"payload").expect("intern succeeds");
+        let mut bytes = Vec::new();
+        store.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes.truncate(bytes.len() - 1);
+
+        assert!(matches!(
+            ObjectStore::read_snapshot(bytes.as_slice()),
+            Err(ObjectStorePersistenceError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_digest_corruption() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        store.intern(b"payload").expect("intern succeeds");
+        let mut bytes = Vec::new();
+        store.write_snapshot(&mut bytes).expect("snapshot writes");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+
+        assert!(matches!(
+            ObjectStore::read_snapshot(bytes.as_slice()),
+            Err(ObjectStorePersistenceError::DigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_records() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        store.intern(b"payload").expect("intern succeeds");
+        let mut bytes = Vec::new();
+        store.write_snapshot(&mut bytes).expect("snapshot writes");
+        let first_record = bytes[34..].to_vec();
+        bytes[26..34].copy_from_slice(&2u64.to_le_bytes());
+        bytes.extend_from_slice(&first_record);
+
+        assert!(matches!(
+            ObjectStore::read_snapshot(bytes.as_slice()),
+            Err(ObjectStorePersistenceError::DuplicateObject(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_rejects_trailing_bytes() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        store.intern(b"payload").expect("intern succeeds");
+        let mut bytes = Vec::new();
+        store.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes.push(0);
+
+        assert!(matches!(
+            ObjectStore::read_snapshot(bytes.as_slice()),
+            Err(ObjectStorePersistenceError::TrailingBytes)
+        ));
     }
 }

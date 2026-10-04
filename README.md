@@ -8,7 +8,7 @@ The public repository contains only material intended for publication. Private r
 
 ## Current status
 
-Phase 2A — deterministic content identity with SHA-256-backed in-memory deduplication.
+Phase 2B — persistent ObjectStore snapshots with deterministic serialization and integrity validation.
 
 The production implementation is not yet established. Design and implementation will evolve through reproducible tests and benchmarks.
 
