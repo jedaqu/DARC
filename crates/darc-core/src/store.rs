@@ -95,10 +95,7 @@ impl<C: Codec> ObjectStore<C> {
             .sum()
     }
 
-    pub fn make_root(
-        &mut self,
-        files: &BTreeMap<String, Vec<u8>>,
-    ) -> Result<StateRoot, DarcError> {
+    pub fn make_root(&mut self, files: &BTreeMap<String, Vec<u8>>) -> Result<StateRoot, DarcError> {
         let mut entries = Vec::with_capacity(files.len());
         for (path, data) in files {
             entries.push(self.make_entry(path, data)?);
@@ -123,11 +120,7 @@ impl<C: Codec> ObjectStore<C> {
         Ok(StateRoot::new(self.store_id, files))
     }
 
-    pub fn remove_file(
-        &self,
-        root: &StateRoot,
-        path: &str,
-    ) -> Result<StateRoot, DarcError> {
+    pub fn remove_file(&self, root: &StateRoot, path: &str) -> Result<StateRoot, DarcError> {
         self.require_root(root)?;
         let files = root
             .files
@@ -138,10 +131,7 @@ impl<C: Codec> ObjectStore<C> {
         Ok(StateRoot::new(self.store_id, files))
     }
 
-    pub fn materialize(
-        &self,
-        root: &StateRoot,
-    ) -> Result<BTreeMap<String, Vec<u8>>, DarcError> {
+    pub fn materialize(&self, root: &StateRoot) -> Result<BTreeMap<String, Vec<u8>>, DarcError> {
         self.require_root(root)?;
         let mut result = BTreeMap::new();
         for entry in &root.files {
@@ -172,10 +162,7 @@ impl<C: Codec> ObjectStore<C> {
     }
 
     #[cfg(test)]
-    pub(crate) fn corrupt_for_test(
-        &mut self,
-        object_id: &ObjectId,
-    ) -> Result<(), DarcError> {
+    pub(crate) fn corrupt_for_test(&mut self, object_id: &ObjectId) -> Result<(), DarcError> {
         self.require_same_store(object_id)?;
         let stored = self
             .objects
