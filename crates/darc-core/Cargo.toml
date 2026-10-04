@@ -1,0 +1,10 @@
+[package]
+name = "darc-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Core library for DARC"
+
+[lib]
+name = "darc_core"
+path = "src/lib.rs"
