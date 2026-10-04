@@ -418,10 +418,9 @@ mod tests {
             store: store.id(),
             digest: sha256(b"payload"),
         };
-        store.objects.insert(
-            object,
-            Arc::<[u8]>::from(&b"different"[..]),
-        );
+        store
+            .objects
+            .insert(object, Arc::<[u8]>::from(&b"different"[..]));
 
         assert_eq!(
             store.intern(b"payload"),
@@ -433,7 +432,7 @@ mod tests {
     #[test]
     fn state_root_holds_references_without_copying_payloads() {
         let mut store = store();
-        let object = store.intern(b"payload");
+        let object = store.intern(b"payload").expect("intern succeeds");
 
         let root = StateRoot::new(store.id())
             .add_file("a.txt", object)
