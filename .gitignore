@@ -1,0 +1,13 @@
+# Rust
+/target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local artifacts
+*.log
+*.tmp
