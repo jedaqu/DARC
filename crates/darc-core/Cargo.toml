@@ -8,6 +8,7 @@ description = "Core library for DARC"
 [dependencies]
 flate2 = "1"
 sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 
 [lib]
 name = "darc_core"
