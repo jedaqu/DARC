@@ -30,11 +30,8 @@ mod tests {
 
     #[test]
     fn identical_files_share_physical_objects() {
-        let mut store = ObjectStore::with_id(
-            ObjectStoreId::from_bytes([1; 16]),
-            8,
-            ZlibCodec::default(),
-        );
+        let mut store =
+            ObjectStore::with_id(ObjectStoreId::from_bytes([1; 16]), 8, ZlibCodec::default());
         let payload = b"12345678".repeat(100);
         let mut files = BTreeMap::new();
         files.insert("one.bin".to_string(), payload.clone());
@@ -52,27 +49,18 @@ mod tests {
 
     #[test]
     fn cross_store_object_is_rejected() {
-        let mut a = ObjectStore::with_id(
-            ObjectStoreId::from_bytes([1; 16]),
-            4,
-            ZlibCodec::default(),
-        );
-        let mut b = ObjectStore::with_id(
-            ObjectStoreId::from_bytes([2; 16]),
-            4,
-            ZlibCodec::default(),
-        );
+        let mut a =
+            ObjectStore::with_id(ObjectStoreId::from_bytes([1; 16]), 4, ZlibCodec::default());
+        let mut b =
+            ObjectStore::with_id(ObjectStoreId::from_bytes([2; 16]), 4, ZlibCodec::default());
         let foreign = b.intern(b"x").unwrap();
         assert!(matches!(a.get(&foreign), Err(DarcError::WrongStore)));
     }
 
     #[test]
     fn replacement_reuses_unchanged_references() {
-        let mut store = ObjectStore::with_id(
-            ObjectStoreId::from_bytes([3; 16]),
-            4,
-            ZlibCodec::default(),
-        );
+        let mut store =
+            ObjectStore::with_id(ObjectStoreId::from_bytes([3; 16]), 4, ZlibCodec::default());
         let mut files = BTreeMap::new();
         files.insert("a.txt".to_string(), b"AAAA".to_vec());
         files.insert("b.txt".to_string(), b"BBBB".to_vec());
@@ -90,11 +78,8 @@ mod tests {
 
     #[test]
     fn corrupted_payload_fails_integrity() {
-        let mut store = ObjectStore::with_id(
-            ObjectStoreId::from_bytes([4; 16]),
-            64,
-            ZlibCodec::default(),
-        );
+        let mut store =
+            ObjectStore::with_id(ObjectStoreId::from_bytes([4; 16]), 64, ZlibCodec::default());
         let object_id = store.intern(b"important").unwrap();
         store.corrupt_for_test(&object_id).unwrap();
         assert!(matches!(
@@ -105,13 +90,9 @@ mod tests {
 
     #[test]
     fn foreign_root_is_rejected() {
-        let a = ObjectStore::with_id(
-            ObjectStoreId::from_bytes([5; 16]),
-            4,
-            ZlibCodec::default(),
-        );
-        let foreign =
-            StateRoot::new_for_test(ObjectStoreId::from_bytes([6; 16]), Vec::new());
+        let a =
+            ObjectStore::with_id(ObjectStoreId::from_bytes([5; 16]), 4, ZlibCodec::default());
+        let foreign = StateRoot::new_for_test(ObjectStoreId::from_bytes([6; 16]), Vec::new());
         assert!(matches!(
             a.verify_root(&foreign),
             Err(DarcError::WrongStore)
