@@ -75,7 +75,9 @@ impl<C: Codec> ObjectStore<C> {
             .objects
             .get(object_id.digest())
             .ok_or(DarcError::ObjectNotFound)?;
-        let data = self.codec.decode(&stored.compressed, stored.original_size)?;
+        let data = self
+            .codec
+            .decode(&stored.compressed, stored.original_size)?;
         if digest(&data) != *object_id.digest() {
             return Err(DarcError::IntegrityFailure);
         }
@@ -87,10 +89,16 @@ impl<C: Codec> ObjectStore<C> {
     }
 
     pub fn physical_compressed_bytes(&self) -> usize {
-        self.objects.values().map(StoredObject::compressed_size).sum()
+        self.objects
+            .values()
+            .map(StoredObject::compressed_size)
+            .sum()
     }
 
-    pub fn make_root(&mut self, files: &BTreeMap<String, Vec<u8>>) -> Result<StateRoot, DarcError> {
+    pub fn make_root(
+        &mut self,
+        files: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<StateRoot, DarcError> {
         let mut entries = Vec::with_capacity(files.len());
         for (path, data) in files {
             entries.push(self.make_entry(path, data)?);
@@ -115,7 +123,11 @@ impl<C: Codec> ObjectStore<C> {
         Ok(StateRoot::new(self.store_id, files))
     }
 
-    pub fn remove_file(&self, root: &StateRoot, path: &str) -> Result<StateRoot, DarcError> {
+    pub fn remove_file(
+        &self,
+        root: &StateRoot,
+        path: &str,
+    ) -> Result<StateRoot, DarcError> {
         self.require_root(root)?;
         let files = root
             .files
@@ -126,7 +138,10 @@ impl<C: Codec> ObjectStore<C> {
         Ok(StateRoot::new(self.store_id, files))
     }
 
-    pub fn materialize(&self, root: &StateRoot) -> Result<BTreeMap<String, Vec<u8>>, DarcError> {
+    pub fn materialize(
+        &self,
+        root: &StateRoot,
+    ) -> Result<BTreeMap<String, Vec<u8>>, DarcError> {
         self.require_root(root)?;
         let mut result = BTreeMap::new();
         for entry in &root.files {
@@ -157,7 +172,10 @@ impl<C: Codec> ObjectStore<C> {
     }
 
     #[cfg(test)]
-    pub(crate) fn corrupt_for_test(&mut self, object_id: &ObjectId) -> Result<(), DarcError> {
+    pub(crate) fn corrupt_for_test(
+        &mut self,
+        object_id: &ObjectId,
+    ) -> Result<(), DarcError> {
         self.require_same_store(object_id)?;
         let stored = self
             .objects
