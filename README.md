@@ -8,7 +8,7 @@ The public repository contains only material intended for publication. Private r
 
 ## Current status
 
-Phase 1 — public core object model with in-memory deduplication and immutable state roots.
+Phase 2A — deterministic content identity with SHA-256-backed in-memory deduplication.
 
 The production implementation is not yet established. Design and implementation will evolve through reproducible tests and benchmarks.
 
