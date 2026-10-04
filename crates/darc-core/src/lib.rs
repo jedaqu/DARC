@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 /// Current public crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -32,7 +34,7 @@ impl ObjectStoreId {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ObjectId {
     store: ObjectStoreId,
-    slot: u64,
+    digest: [u8; 32],
 }
 
 impl ObjectId {
@@ -40,8 +42,8 @@ impl ObjectId {
         self.store
     }
 
-    pub const fn slot(self) -> u64 {
-        self.slot
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
     }
 }
 
@@ -213,39 +215,36 @@ impl std::error::Error for StateRootError {}
 pub enum ObjectStoreError {
     StoreMismatch(StoreMismatch),
     UnknownObject(ObjectId),
+    HashCollision(ObjectId),
 }
 
 impl fmt::Display for ObjectStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StoreMismatch(error) => error.fmt(formatter),
-            Self::UnknownObject(object) => {
-                write!(formatter, "unknown object at slot {}", object.slot())
-            }
+            Self::UnknownObject(_) => write!(formatter, "unknown object"),
+            Self::HashCollision(_) => write!(formatter, "hash collision detected"),
         }
     }
 }
 
 impl std::error::Error for ObjectStoreError {}
 
-/// In-memory reference object store for the first public core model.
+/// In-memory reference object store for the content-identity model.
 ///
-/// Objects are immutable after insertion. The equality index deliberately uses
-/// the original bytes for Phase 1 correctness; persistent hashing and packed
-/// storage are deferred to later phases.
+/// Objects are immutable after insertion. Their identity is derived from the
+/// SHA-256 digest of their exact bytes and is bound to the store identity.
 #[derive(Debug)]
 pub struct ObjectStore {
     id: ObjectStoreId,
-    objects: Vec<Arc<[u8]>>,
-    index: HashMap<Vec<u8>, ObjectId>,
+    objects: HashMap<ObjectId, Arc<[u8]>>,
 }
 
 impl ObjectStore {
     pub fn new(id: ObjectStoreId) -> Self {
         Self {
             id,
-            objects: Vec::new(),
-            index: HashMap::new(),
+            objects: HashMap::new(),
         }
     }
 
@@ -253,26 +252,31 @@ impl ObjectStore {
         self.id
     }
 
-    /// Intern bytes once and return their stable object identity for this store.
-    pub fn intern(&mut self, bytes: impl AsRef<[u8]>) -> ObjectId {
+    /// Intern bytes once and return their deterministic content identity.
+    ///
+    /// Equal bytes in the same store always produce the same object ID.
+    /// A digest collision is treated as an explicit error rather than silently
+    /// aliasing different bytes.
+    pub fn intern(&mut self, bytes: impl AsRef<[u8]>) -> Result<ObjectId, ObjectStoreError> {
         let bytes = bytes.as_ref();
+        let digest = Sha256::digest(bytes);
+        let mut digest_bytes = [0u8; 32];
+        digest_bytes.copy_from_slice(&digest);
 
-        if let Some(&object) = self.index.get(bytes) {
-            return object;
-        }
-
-        let slot = u64::try_from(self.objects.len())
-            .expect("object store exceeded the representable u64 slot count");
         let object = ObjectId {
             store: self.id,
-            slot,
+            digest: digest_bytes,
         };
 
-        let owned = bytes.to_vec();
-        self.objects.push(Arc::<[u8]>::from(owned.clone()));
-        self.index.insert(owned, object);
-
-        object
+        match self.objects.get(&object) {
+            Some(existing) if existing.as_ref() == bytes => Ok(object),
+            Some(_) => Err(ObjectStoreError::HashCollision(object)),
+            None => {
+                self.objects
+                    .insert(object, Arc::<[u8]>::from(bytes.to_vec()));
+                Ok(object)
+            }
+        }
     }
 
     pub fn get(&self, object: ObjectId) -> Result<&[u8], ObjectStoreError> {
@@ -283,22 +287,26 @@ impl ObjectStore {
             }));
         }
 
-        let slot =
-            usize::try_from(object.slot()).map_err(|_| ObjectStoreError::UnknownObject(object))?;
-
         self.objects
-            .get(slot)
+            .get(&object)
             .map(|bytes| bytes.as_ref())
             .ok_or(ObjectStoreError::UnknownObject(object))
     }
 
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.objects.len()
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(bytes);
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&digest);
+    result
 }
 
 #[cfg(test)]
@@ -318,8 +326,8 @@ mod tests {
     fn identical_content_is_interned_once() {
         let mut store = store();
 
-        let first = store.intern(b"same");
-        let second = store.intern(b"same");
+        let first = store.intern(b"same").expect("intern succeeds");
+        let second = store.intern(b"same").expect("intern succeeds");
 
         assert_eq!(first, second);
         assert_eq!(store.len(), 1);
@@ -329,8 +337,8 @@ mod tests {
     fn distinct_content_gets_distinct_ids() {
         let mut store = store();
 
-        let first = store.intern(b"alpha");
-        let second = store.intern(b"beta");
+        let first = store.intern(b"alpha").expect("intern succeeds");
+        let second = store.intern(b"beta").expect("intern succeeds");
 
         assert_ne!(first, second);
         assert_eq!(store.len(), 2);
@@ -340,8 +348,8 @@ mod tests {
     fn empty_content_is_a_valid_interned_object() {
         let mut store = store();
 
-        let first = store.intern([]);
-        let second = store.intern([]);
+        let first = store.intern([]).expect("intern succeeds");
+        let second = store.intern([]).expect("intern succeeds");
 
         assert_eq!(first, second);
         assert_eq!(store.get(first).expect("object exists"), b"");
@@ -351,7 +359,7 @@ mod tests {
     fn store_rejects_an_object_from_another_store() {
         let mut first = ObjectStore::new(ObjectStoreId::new(1));
         let second = ObjectStore::new(ObjectStoreId::new(2));
-        let object = first.intern(b"data");
+        let object = first.intern(b"data").expect("intern succeeds");
 
         assert_eq!(
             second.get(object),
@@ -367,7 +375,7 @@ mod tests {
         let store = store();
         let fabricated_from_known_store = ObjectId {
             store: store.id(),
-            slot: 99,
+            digest: [0xAA; 32],
         };
 
         assert_eq!(
@@ -377,9 +385,54 @@ mod tests {
     }
 
     #[test]
+    fn content_identity_is_deterministic_across_store_instances() {
+        let mut first = store();
+        let mut second = store();
+
+        let a = first.intern(b"deterministic").expect("intern succeeds");
+        let b = second.intern(b"deterministic").expect("intern succeeds");
+
+        assert_eq!(a, b);
+        assert_eq!(a.store_id(), ObjectStoreId::new(1));
+    }
+
+    #[test]
+    fn known_sha256_digest_is_stable() {
+        let mut store = store();
+        let object = store.intern(b"abc").expect("intern succeeds");
+
+        let expected = [
+            0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+            0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+            0xf2, 0x00, 0x15, 0xad,
+        ];
+
+        assert_eq!(object.digest(), expected);
+        assert_eq!(object.digest(), sha256(b"abc"));
+    }
+
+    #[test]
+    fn hash_collision_is_not_silently_aliased() {
+        let mut store = store();
+        let object = ObjectId {
+            store: store.id(),
+            digest: sha256(b"payload"),
+        };
+        store
+            .objects
+            .insert(object, Arc::<[u8]>::from(&b"different"[..]));
+
+        assert_eq!(
+            store.intern(b"payload"),
+            Err(ObjectStoreError::HashCollision(object))
+        );
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
     fn state_root_holds_references_without_copying_payloads() {
         let mut store = store();
-        let object = store.intern(b"payload");
+        let object = store.intern(b"payload").expect("intern succeeds");
 
         let root = StateRoot::new(store.id())
             .add_file("a.txt", object)
@@ -393,8 +446,8 @@ mod tests {
     #[test]
     fn replacing_an_object_creates_a_new_root_and_preserves_old_root() {
         let mut store = store();
-        let old_object = store.intern(b"old");
-        let new_object = store.intern(b"new");
+        let old_object = store.intern(b"old").expect("intern succeeds");
+        let new_object = store.intern(b"new").expect("intern succeeds");
 
         let root = StateRoot::new(store.id())
             .add_file("a.txt", old_object)
@@ -412,7 +465,7 @@ mod tests {
     fn state_root_rejects_cross_store_objects() {
         let first = ObjectStore::new(ObjectStoreId::new(1));
         let mut second = ObjectStore::new(ObjectStoreId::new(2));
-        let object = second.intern(b"foreign");
+        let object = second.intern(b"foreign").expect("intern succeeds");
 
         let root = StateRoot::new(first.id());
         let error = root
@@ -431,7 +484,7 @@ mod tests {
     #[test]
     fn state_root_rejects_duplicate_names() {
         let mut store = store();
-        let object = store.intern(b"data");
+        let object = store.intern(b"data").expect("intern succeeds");
         let root = StateRoot::new(store.id())
             .add_file("a.txt", object)
             .expect("first entry");
@@ -444,7 +497,7 @@ mod tests {
     #[test]
     fn state_root_rejects_unknown_names_on_replace() {
         let mut store = store();
-        let object = store.intern(b"data");
+        let object = store.intern(b"data").expect("intern succeeds");
         let root = StateRoot::new(store.id());
 
         let error = root
@@ -458,8 +511,8 @@ mod tests {
     fn from_entries_validates_all_store_boundaries() {
         let mut first = ObjectStore::new(ObjectStoreId::new(1));
         let mut second = ObjectStore::new(ObjectStoreId::new(2));
-        let first_object = first.intern(b"first");
-        let second_object = second.intern(b"second");
+        let first_object = first.intern(b"first").expect("intern succeeds");
+        let second_object = second.intern(b"second").expect("intern succeeds");
 
         let error = StateRoot::from_entries(
             first.id(),
@@ -482,7 +535,7 @@ mod tests {
     #[test]
     fn from_entries_rejects_duplicate_names() {
         let mut store = ObjectStore::new(ObjectStoreId::new(1));
-        let object = store.intern(b"same");
+        let object = store.intern(b"same").expect("intern succeeds");
 
         let error = StateRoot::from_entries(
             store.id(),
