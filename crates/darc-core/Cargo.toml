@@ -5,6 +5,10 @@ edition = "2024"
 license = "MIT"
 description = "Core library for DARC"
 
+[dependencies]
+flate2 = "1"
+sha2 = "0.10"
+
 [lib]
 name = "darc_core"
 path = "src/lib.rs"
