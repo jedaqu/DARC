@@ -1,4 +1,4 @@
-use flate2::{read::ZlibDecoder, write::ZlibEncoder, Compression};
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 
