@@ -90,8 +90,7 @@ mod tests {
 
     #[test]
     fn foreign_root_is_rejected() {
-        let a =
-            ObjectStore::with_id(ObjectStoreId::from_bytes([5; 16]), 4, ZlibCodec::default());
+        let a = ObjectStore::with_id(ObjectStoreId::from_bytes([5; 16]), 4, ZlibCodec::default());
         let foreign = StateRoot::new_for_test(ObjectStoreId::from_bytes([6; 16]), Vec::new());
         assert!(matches!(
             a.verify_root(&foreign),
