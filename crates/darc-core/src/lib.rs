@@ -419,13 +419,13 @@ mod tests {
             .add_file("foreign.txt", object)
             .expect_err("must reject");
 
-        assert!(matches!(
+        assert_eq!(
             error,
             StateRootError::StoreMismatch(StoreMismatch {
                 expected: ObjectStoreId::new(1),
                 actual: ObjectStoreId::new(2),
             })
-        ));
+        );
     }
 
     #[test]
