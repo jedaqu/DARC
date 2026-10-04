@@ -139,11 +139,7 @@ impl StateRoot {
         })
     }
 
-    pub fn replace_object(
-        &self,
-        name: &str,
-        object: ObjectId,
-    ) -> Result<Self, StateRootError> {
+    pub fn replace_object(&self, name: &str, object: ObjectId) -> Result<Self, StateRootError> {
         self.validate_object(object)?;
 
         let index = self
@@ -287,8 +283,8 @@ impl ObjectStore {
             }));
         }
 
-        let slot = usize::try_from(object.slot())
-            .map_err(|_| ObjectStoreError::UnknownObject(object))?;
+        let slot =
+            usize::try_from(object.slot()).map_err(|_| ObjectStoreError::UnknownObject(object))?;
 
         self.objects
             .get(slot)
@@ -419,7 +415,9 @@ mod tests {
         let object = second.intern(b"foreign");
 
         let root = StateRoot::new(first.id());
-        let error = root.add_file("foreign.txt", object).expect_err("must reject");
+        let error = root
+            .add_file("foreign.txt", object)
+            .expect_err("must reject");
 
         assert!(matches!(
             error,
@@ -453,10 +451,7 @@ mod tests {
             .replace_object("missing.txt", object)
             .expect_err("must reject");
 
-        assert_eq!(
-            error,
-            StateRootError::MissingName("missing.txt".to_owned())
-        );
+        assert_eq!(error, StateRootError::MissingName("missing.txt".to_owned()));
     }
 
     #[test]
@@ -491,10 +486,7 @@ mod tests {
 
         let error = StateRoot::from_entries(
             store.id(),
-            vec![
-                FileEntry::new("a", object),
-                FileEntry::new("a", object),
-            ],
+            vec![FileEntry::new("a", object), FileEntry::new("a", object)],
         )
         .expect_err("duplicate names must be rejected");
 
