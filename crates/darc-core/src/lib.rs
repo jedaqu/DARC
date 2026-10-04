@@ -293,11 +293,11 @@ impl ObjectStore {
             .ok_or(ObjectStoreError::UnknownObject(object))
     }
 
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.objects.len()
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.objects.is_empty()
     }
 }
