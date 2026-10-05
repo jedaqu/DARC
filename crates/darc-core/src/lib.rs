@@ -172,7 +172,9 @@ impl StateRoot {
         writer.write_all(&STATE_ROOT_PERSISTENCE_MAGIC)?;
         writer.write_all(&STATE_ROOT_PERSISTENCE_VERSION.to_le_bytes())?;
         writer.write_all(&self.store.get().to_le_bytes())?;
-        writer.write_all(&(self.entries.len() as u64).to_le_bytes())?;
+        let entry_count = u64::try_from(self.entries.len())
+            .map_err(|_| StateRootPersistenceError::LengthOverflow)?;
+        writer.write_all(&entry_count.to_le_bytes())?;
 
         let mut entries: Vec<_> = self.entries.iter().collect();
         entries.sort_by(|left, right| left.name.cmp(&right.name));
@@ -244,19 +246,9 @@ impl StateRoot {
                 digest,
             };
 
-            store
-                .get(object)
-                .map_err(|error| match error {
-                    ObjectStoreError::UnknownObject(object) => {
-                        StateRootPersistenceError::UnknownObject(object)
-                    }
-                    ObjectStoreError::StoreMismatch(error) => {
-                        StateRootPersistenceError::StoreMismatch(error)
-                    }
-                    ObjectStoreError::HashCollision(_) => {
-                        StateRootPersistenceError::UnknownObject(object)
-                    }
-                })?;
+            if !store.objects.contains_key(&object) {
+                return Err(StateRootPersistenceError::UnknownObject(object));
+            }
 
             entries.push(FileEntry::new(name, object));
         }
@@ -265,8 +257,18 @@ impl StateRoot {
             return Err(StateRootPersistenceError::TrailingBytes);
         }
 
-        StateRoot::from_entries(snapshot_store, entries)
-            .map_err(StateRootPersistenceError::from)
+        match StateRoot::from_entries(snapshot_store, entries) {
+            Ok(root) => Ok(root),
+            Err(StateRootError::StoreMismatch(error)) => {
+                Err(StateRootPersistenceError::StoreMismatch(error))
+            }
+            Err(StateRootError::DuplicateName(name)) => {
+                Err(StateRootPersistenceError::DuplicateName(name))
+            }
+            Err(StateRootError::MissingName(name)) => {
+                unreachable!("from_entries cannot return MissingName: {name}")
+            }
+        }
     }
 
     fn validate_object(&self, object: ObjectId) -> Result<(), StateRootError> {
@@ -367,16 +369,6 @@ impl std::error::Error for StateRootPersistenceError {
 impl From<io::Error> for StateRootPersistenceError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
-    }
-}
-
-impl From<StateRootError> for StateRootPersistenceError {
-    fn from(error: StateRootError) -> Self {
-        match error {
-            StateRootError::StoreMismatch(error) => Self::StoreMismatch(error),
-            StateRootError::DuplicateName(name) => Self::DuplicateName(name),
-            StateRootError::MissingName(name) => Self::DuplicateName(name),
-        }
     }
 }
 
@@ -1002,6 +994,22 @@ mod tests {
         assert!(matches!(
             StateRoot::read_snapshot(&store, bytes.as_slice()),
             Err(StateRootPersistenceError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_length_overflow() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DARCST01");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&7u128.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+
+        let store = ObjectStore::new(ObjectStoreId::new(7));
+        assert!(matches!(
+            StateRoot::read_snapshot(&store, bytes.as_slice()),
+            Err(StateRootPersistenceError::LengthOverflow)
         ));
     }
 
