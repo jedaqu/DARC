@@ -921,7 +921,21 @@ mod tests {
 
         let restored = StateRoot::read_snapshot(&store, bytes.as_slice()).expect("snapshot reads");
 
-        assert_eq!(restored, root);
+        assert_eq!(root.store_id(), store.id());
+        assert_eq!(root.entries()[0].name(), "z.txt");
+        assert_eq!(root.entries()[1].name(), "a.txt");
+
+        assert_eq!(restored.store_id(), store.id());
+        assert_eq!(restored.entries()[0].name(), "a.txt");
+        assert_eq!(restored.entries()[0].object(), first);
+        assert_eq!(restored.entries()[1].name(), "z.txt");
+        assert_eq!(restored.entries()[1].object(), second);
+
+        let mut restored_bytes = Vec::new();
+        restored
+            .write_snapshot(&mut restored_bytes)
+            .expect("snapshot re-writes");
+        assert_eq!(restored_bytes, bytes);
     }
 
     #[test]
