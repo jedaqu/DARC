@@ -90,7 +90,10 @@ impl fmt::Display for CodecError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CodecMismatch { expected, actual } => {
-                write!(formatter, "codec mismatch: expected {expected}, got {actual}")
+                write!(
+                    formatter,
+                    "codec mismatch: expected {expected}, got {actual}"
+                )
             }
             Self::EncodeFailed(message) => write!(formatter, "codec encode failed: {message}"),
             Self::DecodeFailed(message) => write!(formatter, "codec decode failed: {message}"),
