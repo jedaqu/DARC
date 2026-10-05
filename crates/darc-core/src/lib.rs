@@ -160,6 +160,115 @@ impl StateRoot {
         })
     }
 
+    /// Write a deterministic, versioned binary snapshot of this logical state.
+    ///
+    /// Entries are serialized in lexical name order so equivalent roots produce
+    /// identical bytes regardless of insertion order. Object payloads are not
+    /// included; only their content identities are referenced.
+    pub fn write_snapshot<W: Write>(
+        &self,
+        mut writer: W,
+    ) -> Result<(), StateRootPersistenceError> {
+        writer.write_all(&STATE_ROOT_PERSISTENCE_MAGIC)?;
+        writer.write_all(&STATE_ROOT_PERSISTENCE_VERSION.to_le_bytes())?;
+        writer.write_all(&self.store.get().to_le_bytes())?;
+        writer.write_all(&(self.entries.len() as u64).to_le_bytes())?;
+
+        let mut entries: Vec<_> = self.entries.iter().collect();
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+
+        for entry in entries {
+            let name = entry.name.as_bytes();
+            let length = u64::try_from(name.len())
+                .map_err(|_| StateRootPersistenceError::LengthOverflow)?;
+
+            writer.write_all(&length.to_le_bytes())?;
+            writer.write_all(name)?;
+            writer.write_all(&entry.object.digest())?;
+        }
+
+        Ok(())
+    }
+
+    /// Load a logical state snapshot against an existing object store.
+    ///
+    /// The snapshot store identity must match the supplied store and every
+    /// referenced object must already exist in that store.
+    pub fn read_snapshot<R: Read>(
+        store: &ObjectStore,
+        mut reader: R,
+    ) -> Result<Self, StateRootPersistenceError> {
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data)?;
+        let mut offset = 0usize;
+
+        let magic = read_state_root_array::<8>(&data, &mut offset)?;
+        if magic != STATE_ROOT_PERSISTENCE_MAGIC {
+            return Err(StateRootPersistenceError::InvalidMagic);
+        }
+
+        let version = read_state_root_u16(&data, &mut offset)?;
+        if version != STATE_ROOT_PERSISTENCE_VERSION {
+            return Err(StateRootPersistenceError::UnsupportedVersion(version));
+        }
+
+        let snapshot_store = ObjectStoreId::new(u128::from_le_bytes(
+            read_state_root_array::<16>(&data, &mut offset)?,
+        ));
+        if snapshot_store != store.id() {
+            return Err(StateRootPersistenceError::StoreMismatch(StoreMismatch {
+                expected: store.id(),
+                actual: snapshot_store,
+            }));
+        }
+
+        let entry_count = read_state_root_u64(&data, &mut offset)?;
+        let mut entries = Vec::new();
+
+        for _ in 0..entry_count {
+            let name_length = usize::try_from(read_state_root_u64(&data, &mut offset)?)
+                .map_err(|_| StateRootPersistenceError::LengthOverflow)?;
+            let end = offset
+                .checked_add(name_length)
+                .ok_or(StateRootPersistenceError::LengthOverflow)?;
+            let name_bytes = data
+                .get(offset..end)
+                .ok_or(StateRootPersistenceError::Truncated)?;
+            offset = end;
+
+            let name = String::from_utf8(name_bytes.to_vec())
+                .map_err(|_| StateRootPersistenceError::InvalidUtf8)?;
+            let digest = read_state_root_array::<32>(&data, &mut offset)?;
+            let object = ObjectId {
+                store: snapshot_store,
+                digest,
+            };
+
+            store
+                .get(object)
+                .map_err(|error| match error {
+                    ObjectStoreError::UnknownObject(object) => {
+                        StateRootPersistenceError::UnknownObject(object)
+                    }
+                    ObjectStoreError::StoreMismatch(error) => {
+                        StateRootPersistenceError::StoreMismatch(error)
+                    }
+                    ObjectStoreError::HashCollision(_) => {
+                        StateRootPersistenceError::UnknownObject(object)
+                    }
+                })?;
+
+            entries.push(FileEntry::new(name, object));
+        }
+
+        if offset != data.len() {
+            return Err(StateRootPersistenceError::TrailingBytes);
+        }
+
+        StateRoot::from_entries(snapshot_store, entries)
+            .map_err(StateRootPersistenceError::from)
+    }
+
     fn validate_object(&self, object: ObjectId) -> Result<(), StateRootError> {
         if object.store_id() != self.store {
             return Err(StateRootError::StoreMismatch(StoreMismatch {
@@ -210,6 +319,66 @@ impl fmt::Display for StateRootError {
 }
 
 impl std::error::Error for StateRootError {}
+
+/// Errors raised while serializing or loading a logical state snapshot.
+#[derive(Debug)]
+pub enum StateRootPersistenceError {
+    Io(io::Error),
+    InvalidMagic,
+    UnsupportedVersion(u16),
+    Truncated,
+    LengthOverflow,
+    InvalidUtf8,
+    StoreMismatch(StoreMismatch),
+    DuplicateName(String),
+    UnknownObject(ObjectId),
+    TrailingBytes,
+}
+
+impl fmt::Display for StateRootPersistenceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(error) => write!(formatter, "I/O error: {error}"),
+            Self::InvalidMagic => write!(formatter, "invalid state-root magic"),
+            Self::UnsupportedVersion(version) => {
+                write!(formatter, "unsupported state-root version: {version}")
+            }
+            Self::Truncated => write!(formatter, "truncated state-root snapshot"),
+            Self::LengthOverflow => write!(formatter, "state-root length does not fit in memory"),
+            Self::InvalidUtf8 => write!(formatter, "state-root entry name is not valid UTF-8"),
+            Self::StoreMismatch(error) => error.fmt(formatter),
+            Self::DuplicateName(name) => write!(formatter, "file entry already exists: {name}"),
+            Self::UnknownObject(_) => write!(formatter, "state-root references an unknown object"),
+            Self::TrailingBytes => write!(formatter, "unexpected trailing bytes in state-root snapshot"),
+        }
+    }
+}
+
+impl std::error::Error for StateRootPersistenceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::StoreMismatch(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for StateRootPersistenceError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<StateRootError> for StateRootPersistenceError {
+    fn from(error: StateRootError) -> Self {
+        match error {
+            StateRootError::StoreMismatch(error) => Self::StoreMismatch(error),
+            StateRootError::DuplicateName(name) => Self::DuplicateName(name),
+            StateRootError::MissingName(name) => Self::DuplicateName(name),
+        }
+    }
+}
 
 /// Errors returned by object-store access.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -275,6 +444,9 @@ impl From<io::Error> for ObjectStorePersistenceError {
         Self::Io(error)
     }
 }
+
+const STATE_ROOT_PERSISTENCE_MAGIC: [u8; 8] = *b"DARCST01";
+const STATE_ROOT_PERSISTENCE_VERSION: u16 = 1;
 
 const PERSISTENCE_MAGIC: [u8; 8] = *b"DARCOS01";
 const PERSISTENCE_VERSION: u16 = 1;
@@ -456,6 +628,37 @@ fn read_array<const N: usize>(
     let mut result = [0u8; N];
     result.copy_from_slice(slice);
     Ok(result)
+}
+
+fn read_state_root_array<const N: usize>(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<[u8; N], StateRootPersistenceError> {
+    let end = offset
+        .checked_add(N)
+        .ok_or(StateRootPersistenceError::Truncated)?;
+    let slice = data
+        .get(*offset..end)
+        .ok_or(StateRootPersistenceError::Truncated)?;
+    *offset = end;
+
+    let mut result = [0u8; N];
+    result.copy_from_slice(slice);
+    Ok(result)
+}
+
+fn read_state_root_u16(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<u16, StateRootPersistenceError> {
+    Ok(u16::from_le_bytes(read_state_root_array::<2>(data, offset)?))
+}
+
+fn read_state_root_u64(
+    data: &[u8],
+    offset: &mut usize,
+) -> Result<u64, StateRootPersistenceError> {
+    Ok(u64::from_le_bytes(read_state_root_array::<8>(data, offset)?))
 }
 
 fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16, ObjectStorePersistenceError> {
@@ -708,6 +911,185 @@ mod tests {
         .expect_err("duplicate names must be rejected");
 
         assert_eq!(error, StateRootError::DuplicateName("a".to_owned()));
+    }
+
+    #[test]
+    fn state_root_snapshot_round_trip_preserves_logical_state() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        let first = store.intern(b"alpha").expect("intern succeeds");
+        let second = store.intern(b"beta").expect("intern succeeds");
+
+        let root = StateRoot::new(store.id())
+            .add_file("z.txt", second)
+            .expect("first file")
+            .add_file("a.txt", first)
+            .expect("second file");
+
+        let mut bytes = Vec::new();
+        root.write_snapshot(&mut bytes).expect("snapshot writes");
+
+        let restored = StateRoot::read_snapshot(&store, bytes.as_slice())
+            .expect("snapshot reads");
+
+        assert_eq!(restored, root);
+    }
+
+    #[test]
+    fn state_root_snapshot_is_deterministic_across_insertion_order() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        let alpha = store.intern(b"alpha").expect("intern succeeds");
+        let beta = store.intern(b"beta").expect("intern succeeds");
+
+        let first = StateRoot::from_entries(
+            store.id(),
+            vec![FileEntry::new("b.txt", beta), FileEntry::new("a.txt", alpha)],
+        )
+        .expect("first root");
+        let second = StateRoot::from_entries(
+            store.id(),
+            vec![FileEntry::new("a.txt", alpha), FileEntry::new("b.txt", beta)],
+        )
+        .expect("second root");
+
+        let mut first_bytes = Vec::new();
+        let mut second_bytes = Vec::new();
+        first
+            .write_snapshot(&mut first_bytes)
+            .expect("snapshot writes");
+        second
+            .write_snapshot(&mut second_bytes)
+            .expect("snapshot writes");
+
+        assert_eq!(first_bytes, second_bytes);
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_invalid_magic() {
+        let root = StateRoot::new(ObjectStoreId::new(7));
+        let mut bytes = Vec::new();
+        root.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes[0] ^= 0xFF;
+
+        let store = ObjectStore::new(ObjectStoreId::new(7));
+        assert!(matches!(
+            StateRoot::read_snapshot(&store, bytes.as_slice()),
+            Err(StateRootPersistenceError::InvalidMagic)
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_unsupported_version() {
+        let root = StateRoot::new(ObjectStoreId::new(7));
+        let mut bytes = Vec::new();
+        root.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+
+        let store = ObjectStore::new(ObjectStoreId::new(7));
+        assert!(matches!(
+            StateRoot::read_snapshot(&store, bytes.as_slice()),
+            Err(StateRootPersistenceError::UnsupportedVersion(2))
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_truncation() {
+        let root = StateRoot::new(ObjectStoreId::new(7));
+        let mut bytes = Vec::new();
+        root.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes.truncate(bytes.len() - 1);
+
+        let store = ObjectStore::new(ObjectStoreId::new(7));
+        assert!(matches!(
+            StateRoot::read_snapshot(&store, bytes.as_slice()),
+            Err(StateRootPersistenceError::Truncated)
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_invalid_utf8() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"DARCST01");
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&7u128.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.push(0xFF);
+        bytes.extend_from_slice(&[0; 32]);
+
+        let store = ObjectStore::new(ObjectStoreId::new(7));
+        assert!(matches!(
+            StateRoot::read_snapshot(&store, bytes.as_slice()),
+            Err(StateRootPersistenceError::InvalidUtf8)
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_duplicate_names() {
+        let mut store = ObjectStore::new(ObjectStoreId::new(7));
+        let object = store.intern(b"same").expect("intern succeeds");
+        let mut root = StateRoot::new(store.id());
+        root.entries = vec![FileEntry::new("a", object), FileEntry::new("a", object)];
+
+        let mut bytes = Vec::new();
+        root.write_snapshot(&mut bytes).expect("snapshot writes");
+
+        assert!(matches!(
+            StateRoot::read_snapshot(&store, bytes.as_slice()),
+            Err(StateRootPersistenceError::DuplicateName(name)) if name == "a"
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_wrong_store_id() {
+        let mut source = ObjectStore::new(ObjectStoreId::new(7));
+        let object = source.intern(b"payload").expect("intern succeeds");
+        let root = StateRoot::new(source.id())
+            .add_file("a", object)
+            .expect("root entry");
+
+        let mut bytes = Vec::new();
+        root.write_snapshot(&mut bytes).expect("snapshot writes");
+
+        let target = ObjectStore::new(ObjectStoreId::new(8));
+        assert!(matches!(
+            StateRoot::read_snapshot(&target, bytes.as_slice()),
+            Err(StateRootPersistenceError::StoreMismatch(StoreMismatch { expected, actual }))
+                if expected == ObjectStoreId::new(8) && actual == ObjectStoreId::new(7)
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_unknown_object() {
+        let source = {
+            let mut store = ObjectStore::new(ObjectStoreId::new(7));
+            let object = store.intern(b"payload").expect("intern succeeds");
+            StateRoot::new(store.id())
+                .add_file("a", object)
+                .expect("root entry")
+        };
+
+        let mut bytes = Vec::new();
+        source.write_snapshot(&mut bytes).expect("snapshot writes");
+
+        let target = ObjectStore::new(ObjectStoreId::new(7));
+        assert!(matches!(
+            StateRoot::read_snapshot(&target, bytes.as_slice()),
+            Err(StateRootPersistenceError::UnknownObject(_))
+        ));
+    }
+
+    #[test]
+    fn state_root_snapshot_rejects_trailing_bytes() {
+        let root = StateRoot::new(ObjectStoreId::new(7));
+        let mut bytes = Vec::new();
+        root.write_snapshot(&mut bytes).expect("snapshot writes");
+        bytes.push(0);
+
+        let store = ObjectStore::new(ObjectStoreId::new(7));
+        assert!(matches!(
+            StateRoot::read_snapshot(&store, bytes.as_slice()),
+            Err(StateRootPersistenceError::TrailingBytes)
+        ));
     }
 
     #[test]
