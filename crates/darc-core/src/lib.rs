@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+pub mod codec;
+
 /// Current public crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
