@@ -165,10 +165,7 @@ impl StateRoot {
     /// Entries are serialized in lexical name order so equivalent roots produce
     /// identical bytes regardless of insertion order. Object payloads are not
     /// included; only their content identities are referenced.
-    pub fn write_snapshot<W: Write>(
-        &self,
-        mut writer: W,
-    ) -> Result<(), StateRootPersistenceError> {
+    pub fn write_snapshot<W: Write>(&self, mut writer: W) -> Result<(), StateRootPersistenceError> {
         writer.write_all(&STATE_ROOT_PERSISTENCE_MAGIC)?;
         writer.write_all(&STATE_ROOT_PERSISTENCE_VERSION.to_le_bytes())?;
         writer.write_all(&self.store.get().to_le_bytes())?;
@@ -181,8 +178,8 @@ impl StateRoot {
 
         for entry in entries {
             let name = entry.name.as_bytes();
-            let length = u64::try_from(name.len())
-                .map_err(|_| StateRootPersistenceError::LengthOverflow)?;
+            let length =
+                u64::try_from(name.len()).map_err(|_| StateRootPersistenceError::LengthOverflow)?;
 
             writer.write_all(&length.to_le_bytes())?;
             writer.write_all(name)?;
@@ -214,9 +211,10 @@ impl StateRoot {
             return Err(StateRootPersistenceError::UnsupportedVersion(version));
         }
 
-        let snapshot_store = ObjectStoreId::new(u128::from_le_bytes(
-            read_state_root_array::<16>(&data, &mut offset)?,
-        ));
+        let snapshot_store = ObjectStoreId::new(u128::from_le_bytes(read_state_root_array::<16>(
+            &data,
+            &mut offset,
+        )?));
         if snapshot_store != store.id() {
             return Err(StateRootPersistenceError::StoreMismatch(StoreMismatch {
                 expected: store.id(),
@@ -351,7 +349,10 @@ impl fmt::Display for StateRootPersistenceError {
             Self::StoreMismatch(error) => error.fmt(formatter),
             Self::DuplicateName(name) => write!(formatter, "file entry already exists: {name}"),
             Self::UnknownObject(_) => write!(formatter, "state-root references an unknown object"),
-            Self::TrailingBytes => write!(formatter, "unexpected trailing bytes in state-root snapshot"),
+            Self::TrailingBytes => write!(
+                formatter,
+                "unexpected trailing bytes in state-root snapshot"
+            ),
         }
     }
 }
@@ -639,18 +640,16 @@ fn read_state_root_array<const N: usize>(
     Ok(result)
 }
 
-fn read_state_root_u16(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<u16, StateRootPersistenceError> {
-    Ok(u16::from_le_bytes(read_state_root_array::<2>(data, offset)?))
+fn read_state_root_u16(data: &[u8], offset: &mut usize) -> Result<u16, StateRootPersistenceError> {
+    Ok(u16::from_le_bytes(read_state_root_array::<2>(
+        data, offset,
+    )?))
 }
 
-fn read_state_root_u64(
-    data: &[u8],
-    offset: &mut usize,
-) -> Result<u64, StateRootPersistenceError> {
-    Ok(u64::from_le_bytes(read_state_root_array::<8>(data, offset)?))
+fn read_state_root_u64(data: &[u8], offset: &mut usize) -> Result<u64, StateRootPersistenceError> {
+    Ok(u64::from_le_bytes(read_state_root_array::<8>(
+        data, offset,
+    )?))
 }
 
 fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16, ObjectStorePersistenceError> {
@@ -920,8 +919,7 @@ mod tests {
         let mut bytes = Vec::new();
         root.write_snapshot(&mut bytes).expect("snapshot writes");
 
-        let restored = StateRoot::read_snapshot(&store, bytes.as_slice())
-            .expect("snapshot reads");
+        let restored = StateRoot::read_snapshot(&store, bytes.as_slice()).expect("snapshot reads");
 
         assert_eq!(restored, root);
     }
@@ -934,12 +932,18 @@ mod tests {
 
         let first = StateRoot::from_entries(
             store.id(),
-            vec![FileEntry::new("b.txt", beta), FileEntry::new("a.txt", alpha)],
+            vec![
+                FileEntry::new("b.txt", beta),
+                FileEntry::new("a.txt", alpha),
+            ],
         )
         .expect("first root");
         let second = StateRoot::from_entries(
             store.id(),
-            vec![FileEntry::new("a.txt", alpha), FileEntry::new("b.txt", beta)],
+            vec![
+                FileEntry::new("a.txt", alpha),
+                FileEntry::new("b.txt", beta),
+            ],
         )
         .expect("second root");
 
