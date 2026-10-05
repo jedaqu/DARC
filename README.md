@@ -8,7 +8,7 @@ The public repository contains only material intended for publication. Private r
 
 ## Current status
 
-Phase 2C — persistent StateRoot snapshots with deterministic ordering and store-bound reference validation.
+Phase 2D — codec boundary established with a reference non-compressing codec; production compression algorithm not selected.
 
 The production implementation is not yet established. Design and implementation will evolve through reproducible tests and benchmarks.
 
